@@ -10,6 +10,23 @@ from app.engine.optimizer import (
     solve_multi_objective_packages,
     get_all_candidates_for_visualization
 )
+import os, json, urllib.request, traceback
+
+DEBUG_SERVER_URL = os.environ.get("DEBUG_SERVER_URL", "http://127.0.0.1:7777/event")
+DEBUG_SESSION_ID = os.environ.get("DEBUG_SESSION_ID", "matrix-index-error")
+
+def _dbg_log(event_type: str, data: dict):
+    try:
+        payload = json.dumps({
+            "sessionId": DEBUG_SESSION_ID,
+            "eventType": event_type,
+            "runId": "pre-fix",
+            "data": data
+        }).encode("utf-8")
+        req = urllib.request.Request(DEBUG_SERVER_URL, data=payload, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=0.5)
+    except Exception:
+        pass
 
 router = APIRouter()
 
@@ -37,6 +54,13 @@ async def recommend_packages(request: PackageRequest):
             message=f"成功计算出 {len(recommendations)} 个最优套餐"
         )
     except Exception as e:
+        # region debug-point exception-recommend
+        _dbg_log("exception:recommend", {
+            "error_type": type(e).__name__,
+            "error_msg": str(e),
+            "traceback": traceback.format_exc()
+        })
+        # endregion
         raise HTTPException(status_code=500, detail=f"计算出错: {str(e)}")
 
 
@@ -72,6 +96,13 @@ async def get_visualization_data(request: PackageRequest):
             "top_packages": recommendations
         }
     except Exception as e:
+        # region debug-point exception-recommend
+        _dbg_log("exception:recommend", {
+            "error_type": type(e).__name__,
+            "error_msg": str(e),
+            "traceback": traceback.format_exc()
+        })
+        # endregion
         raise HTTPException(status_code=500, detail=f"计算出错: {str(e)}")
 
 
