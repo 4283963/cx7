@@ -1,6 +1,43 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import date
+from enum import Enum
+
+
+class AirlineCode(str, Enum):
+    CA = "CA"
+    MU = "MU"
+    CZ = "CZ"
+    HU = "HU"
+    SICHUAN = "3U"
+    ZH = "ZH"
+
+
+class FuelSurgeConfig(BaseModel):
+    enabled: bool = False
+    target_airline: str = "CA"
+    price_increase_rate: float = Field(default=2.0, ge=0, le=10)
+    apply_on_booking: bool = True
+
+
+class PriceInterceptLevel(str, Enum):
+    NONE = "none"
+    WARNING = "warning"
+    BLOCKED = "blocked"
+    DOWNGRADED = "downgraded"
+
+
+class BookingResult(BaseModel):
+    success: bool
+    intercept_level: PriceInterceptLevel
+    original_price: float
+    final_price: float
+    price_change_amount: float
+    price_change_rate: float
+    message: str
+    downgraded_alternative: Optional[dict] = None
+    surge_triggered: bool = False
+    affected_airline: Optional[str] = None
 
 
 class FlightInfo(BaseModel):
@@ -10,6 +47,15 @@ class FlightInfo(BaseModel):
     departure_date: date
     base_price: float = Field(gt=0)
     discount_rate: float = Field(default=0.0, ge=0, le=1)
+    
+    @property
+    def airline_code(self) -> str:
+        if not self.flight_no:
+            return ""
+        for i, char in enumerate(self.flight_no):
+            if char.isdigit():
+                return self.flight_no[:i]
+        return self.flight_no
 
 
 class HotelInfo(BaseModel):
@@ -36,6 +82,7 @@ class PackageRequest(BaseModel):
     top_n: int = Field(default=5, ge=1, le=20)
     price_weight: float = Field(default=0.5, ge=0, le=1)
     discount_weight: float = Field(default=0.5, ge=0, le=1)
+    fuel_surge: Optional[FuelSurgeConfig] = None
 
 
 class PackageRecommendation(BaseModel):
@@ -50,6 +97,16 @@ class PackageRecommendation(BaseModel):
     recommendation_score: float
     stay_days: int
     conflict_free: bool
+    fuel_surge_applied: bool = False
+    base_price_before_surge: Optional[float] = None
+
+
+class BookingRequest(BaseModel):
+    package_id: str
+    flight: FlightInfo
+    hotel: HotelInfo
+    quoted_price: float
+    fuel_surge: Optional[FuelSurgeConfig] = None
 
 
 class PackageResponse(BaseModel):

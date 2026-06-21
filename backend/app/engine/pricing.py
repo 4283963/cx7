@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
 from datetime import timedelta
-from typing import List, Tuple, Dict, Any
-from app.schemas import FlightInfo, HotelInfo, TimeWindow, PackageRecommendation
+from typing import List, Tuple, Dict, Any, Optional
+from app.schemas import FlightInfo, HotelInfo, TimeWindow, PackageRecommendation, FuelSurgeConfig
 import os, json, urllib.request
 
 DEBUG_SERVER_URL = os.environ.get("DEBUG_SERVER_URL", "http://127.0.0.1:7777/event")
@@ -20,6 +20,47 @@ def _dbg_log(event_type: str, data: dict):
         urllib.request.urlopen(req, timeout=0.5)
     except Exception:
         pass
+
+
+def get_airline_code(flight_no: str) -> str:
+    if not flight_no:
+        return ""
+    for i, char in enumerate(flight_no):
+        if char.isdigit():
+            return flight_no[:i]
+    return flight_no
+
+
+def apply_fuel_surge(flight: FlightInfo, fuel_surge: Optional[FuelSurgeConfig]) -> Tuple[FlightInfo, bool, float]:
+    if not fuel_surge or not fuel_surge.enabled:
+        return flight, False, flight.base_price
+    
+    airline_code = get_airline_code(flight.flight_no)
+    if airline_code.upper() != fuel_surge.target_airline.upper():
+        return flight, False, flight.base_price
+    
+    original_base_price = flight.base_price
+    new_base_price = flight.base_price * (1 + fuel_surge.price_increase_rate)
+    
+    surged_flight = FlightInfo(
+        flight_no=flight.flight_no,
+        departure_city=flight.departure_city,
+        arrival_city=flight.arrival_city,
+        departure_date=flight.departure_date,
+        base_price=new_base_price,
+        discount_rate=flight.discount_rate
+    )
+    
+    _dbg_log("fuel_surge:applied", {
+        "flight_no": flight.flight_no,
+        "airline_code": airline_code,
+        "original_price": original_base_price,
+        "new_price": new_base_price,
+        "increase_rate": fuel_surge.price_increase_rate,
+        "increase_amount": new_base_price - original_base_price
+    })
+    
+    return surged_flight, True, original_base_price
 
 
 def calculate_flight_price(flight: FlightInfo) -> Tuple[float, float]:
@@ -63,7 +104,8 @@ def check_time_conflict(flight: FlightInfo, hotel: HotelInfo,
 
 def build_candidate_matrix(flights: List[FlightInfo], 
                            hotels: List[HotelInfo],
-                           time_window: TimeWindow) -> pd.DataFrame:
+                           time_window: TimeWindow,
+                           fuel_surge: Optional[FuelSurgeConfig] = None) -> pd.DataFrame:
     # region debug-point build_candidate_matrix-enter
     _dbg_log("build_candidate_matrix:enter", {
         "flights_count": len(flights),
@@ -79,17 +121,21 @@ def build_candidate_matrix(flights: List[FlightInfo],
     candidates = []
     
     for flight in flights:
+        surged_flight, fuel_applied, base_price_before = apply_fuel_surge(flight, fuel_surge)
+        current_flight = surged_flight if fuel_applied else flight
+        
         for hotel in hotels:
             # region debug-point check_time_conflict-before
             _dbg_log("check_time_conflict:before", {
-                "flight_no": flight.flight_no,
-                "flight_date": str(flight.departure_date),
+                "flight_no": current_flight.flight_no,
+                "flight_date": str(current_flight.departure_date),
                 "hotel_id": hotel.hotel_id,
                 "check_in": str(hotel.check_in_date),
-                "check_out": str(hotel.check_out_date)
+                "check_out": str(hotel.check_out_date),
+                "fuel_applied": fuel_applied
             })
             # endregion
-            conflict_free, stay_days = check_time_conflict(flight, hotel, time_window)
+            conflict_free, stay_days = check_time_conflict(current_flight, hotel, time_window)
             # region debug-point check_time_conflict-after
             _dbg_log("check_time_conflict:after", {
                 "conflict_free": conflict_free,
@@ -97,26 +143,27 @@ def build_candidate_matrix(flights: List[FlightInfo],
             })
             # endregion
             
-            flight_discounted, flight_discount = calculate_flight_price(flight)
+            flight_discounted, flight_discount = calculate_flight_price(current_flight)
             hotel_discounted, hotel_discount, _ = calculate_hotel_total_price(hotel)
             
             # region debug-point price-calculation
             _dbg_log("price_calc:before_original_total", {
-                "flight_base": flight.base_price,
+                "flight_base": current_flight.base_price,
                 "hotel_daily": hotel.daily_price,
                 "stay_days": stay_days,
-                "max_stay_days_1": max(stay_days, 1)
+                "max_stay_days_1": max(stay_days, 1),
+                "fuel_applied": fuel_applied
             })
             # endregion
-            original_total = flight.base_price + hotel.daily_price * max(stay_days, 1)
+            original_total = current_flight.base_price + hotel.daily_price * max(stay_days, 1)
             discounted_total = flight_discounted + hotel_discounted
             total_discount_amount = original_total - discounted_total
             total_discount_rate = total_discount_amount / original_total if original_total > 0 else 0
             
             candidates.append({
-                'flight_no': flight.flight_no,
+                'flight_no': current_flight.flight_no,
                 'hotel_id': hotel.hotel_id,
-                'flight_departure_date': flight.departure_date,
+                'flight_departure_date': current_flight.departure_date,
                 'hotel_check_in': hotel.check_in_date,
                 'hotel_check_out': hotel.check_out_date,
                 'stay_days': stay_days,
@@ -124,11 +171,13 @@ def build_candidate_matrix(flights: List[FlightInfo],
                 'discounted_total_price': discounted_total,
                 'total_discount_amount': total_discount_amount,
                 'total_discount_rate': total_discount_rate,
-                'flight_discount_rate': flight.discount_rate,
+                'flight_discount_rate': current_flight.discount_rate,
                 'hotel_discount_rate': hotel.discount_rate,
                 'conflict_free': conflict_free,
-                'flight_obj': flight,
-                'hotel_obj': hotel
+                'flight_obj': current_flight,
+                'hotel_obj': hotel,
+                'fuel_surge_applied': fuel_applied,
+                'base_price_before_surge': base_price_before if fuel_applied else None
             })
     
     # region debug-point build_candidate_matrix-exit
@@ -139,7 +188,7 @@ def build_candidate_matrix(flights: List[FlightInfo],
         'hotel_check_out', 'stay_days', 'original_total_price',
         'discounted_total_price', 'total_discount_amount', 'total_discount_rate',
         'flight_discount_rate', 'hotel_discount_rate', 'conflict_free',
-        'flight_obj', 'hotel_obj'
+        'flight_obj', 'hotel_obj', 'fuel_surge_applied', 'base_price_before_surge'
     ]
     
     if df.empty:

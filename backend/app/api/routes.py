@@ -3,9 +3,13 @@ from typing import List
 from app.schemas import (
     PackageRequest,
     PackageResponse,
-    PackageRecommendation
+    PackageRecommendation,
+    BookingRequest,
+    BookingResult,
+    PriceInterceptLevel,
+    FuelSurgeConfig
 )
-from app.engine.pricing import build_candidate_matrix
+from app.engine.pricing import build_candidate_matrix, apply_fuel_surge, get_airline_code, calculate_flight_price, calculate_hotel_total_price
 from app.engine.optimizer import (
     solve_multi_objective_packages,
     get_all_candidates_for_visualization
@@ -34,10 +38,18 @@ router = APIRouter()
 @router.post("/packages/recommend", response_model=PackageResponse)
 async def recommend_packages(request: PackageRequest):
     try:
+        _dbg_log("recommend:enter", {
+            "flights_count": len(request.flights),
+            "hotels_count": len(request.hotels),
+            "fuel_surge_enabled": request.fuel_surge.enabled if request.fuel_surge else False,
+            "fuel_surge_airline": request.fuel_surge.target_airline if request.fuel_surge else None
+        })
+        
         candidate_df = build_candidate_matrix(
             flights=request.flights,
             hotels=request.hotels,
-            time_window=request.time_window
+            time_window=request.time_window,
+            fuel_surge=request.fuel_surge
         )
         
         recommendations, total_candidates = solve_multi_objective_packages(
@@ -47,11 +59,13 @@ async def recommend_packages(request: PackageRequest):
             discount_weight=request.discount_weight
         )
         
+        surge_count = sum(1 for r in recommendations if r.fuel_surge_applied)
+        
         return PackageResponse(
             success=True,
             total_candidates=total_candidates,
             top_packages=recommendations,
-            message=f"成功计算出 {len(recommendations)} 个最优套餐"
+            message=f"成功计算出 {len(recommendations)} 个最优套餐" + (f"，其中 {surge_count} 个受燃油费影响" if surge_count > 0 else "")
         )
     except Exception as e:
         # region debug-point exception-recommend
@@ -67,10 +81,18 @@ async def recommend_packages(request: PackageRequest):
 @router.post("/packages/visualization")
 async def get_visualization_data(request: PackageRequest):
     try:
+        _dbg_log("visualization:enter", {
+            "flights_count": len(request.flights),
+            "hotels_count": len(request.hotels),
+            "fuel_surge_enabled": request.fuel_surge.enabled if request.fuel_surge else False,
+            "fuel_surge_airline": request.fuel_surge.target_airline if request.fuel_surge else None
+        })
+        
         candidate_df = build_candidate_matrix(
             flights=request.flights,
             hotels=request.hotels,
-            time_window=request.time_window
+            time_window=request.time_window,
+            fuel_surge=request.fuel_surge
         )
         
         all_candidates = get_all_candidates_for_visualization(
@@ -88,12 +110,18 @@ async def get_visualization_data(request: PackageRequest):
         
         top_package_ids = [pkg.package_id for pkg in recommendations]
         
+        conflict_free_count = len(all_candidates)
+        surge_count = sum(1 for c in all_candidates if c.get('fuel_surge_applied', False))
+        
         return {
             "success": True,
             "total_candidates": total_candidates,
+            "conflict_free_count": conflict_free_count,
             "all_candidates": all_candidates,
             "top_package_ids": top_package_ids,
-            "top_packages": recommendations
+            "top_packages": recommendations,
+            "fuel_surge_applied_count": surge_count,
+            "fuel_surge_target": request.fuel_surge.target_airline if request.fuel_surge and request.fuel_surge.enabled else None
         }
     except Exception as e:
         # region debug-point exception-recommend
@@ -156,3 +184,119 @@ async def get_sample_data():
         "hotels": sample_hotels,
         "time_window": sample_time_window
     }
+
+
+@router.post("/packages/book", response_model=BookingResult)
+async def book_package(request: BookingRequest):
+    try:
+        _dbg_log("booking:enter", {
+            "package_id": request.package_id,
+            "quoted_price": request.quoted_price,
+            "fuel_surge_enabled": request.fuel_surge.enabled if request.fuel_surge else False,
+            "fuel_surge_airline": request.fuel_surge.target_airline if request.fuel_surge else None
+        })
+        
+        airline_code = get_airline_code(request.flight.flight_no)
+        
+        surged_flight, fuel_applied, base_before = apply_fuel_surge(
+            request.flight, 
+            request.fuel_surge if request.fuel_surge and request.fuel_surge.apply_on_booking else None
+        )
+        
+        flight_discounted, flight_discount = calculate_flight_price(
+            surged_flight if fuel_applied else request.flight
+        )
+        hotel_discounted, hotel_discount, stay_days = calculate_hotel_total_price(request.hotel)
+        
+        final_price = flight_discounted + hotel_discounted
+        original_price = request.quoted_price
+        price_change = final_price - original_price
+        price_change_rate = price_change / original_price if original_price > 0 else 0
+        
+        _dbg_log("booking:price_check", {
+            "original_price": original_price,
+            "final_price": final_price,
+            "price_change": price_change,
+            "price_change_rate": price_change_rate,
+            "fuel_applied": fuel_applied,
+            "airline_code": airline_code
+        })
+        
+        if not fuel_applied:
+            result = BookingResult(
+                success=True,
+                intercept_level=PriceInterceptLevel.NONE,
+                original_price=original_price,
+                final_price=final_price,
+                price_change_amount=price_change,
+                price_change_rate=price_change_rate,
+                message="价格一致，预订成功",
+                surge_triggered=False,
+                affected_airline=None
+            )
+            _dbg_log("booking:success_none", {"message": "No price change"})
+            return result
+        
+        if price_change_rate <= 0.05:
+            result = BookingResult(
+                success=True,
+                intercept_level=PriceInterceptLevel.WARNING,
+                original_price=original_price,
+                final_price=final_price,
+                price_change_amount=price_change,
+                price_change_rate=price_change_rate,
+                message=f"价格变动 {(price_change_rate * 100):.1f}%，在可接受范围内，已自动确认",
+                surge_triggered=True,
+                affected_airline=airline_code
+            )
+            _dbg_log("booking:success_warning", {"price_change_rate": price_change_rate})
+            return result
+        
+        if price_change_rate <= 0.3:
+            downgraded_alt = {
+                "option": "alternative_flight",
+                "description": "为您推荐其他航空公司的替代航班",
+                "suggested_airlines": [code for code in ["MU", "CZ", "HU", "3U", "ZH"] if code != airline_code]
+            }
+            result = BookingResult(
+                success=False,
+                intercept_level=PriceInterceptLevel.DOWNGRADED,
+                original_price=original_price,
+                final_price=final_price,
+                price_change_amount=price_change,
+                price_change_rate=price_change_rate,
+                message=f"⚠️ 价格变动拦截：{airline_code}航空因燃油费突涨，价格上涨 {(price_change_rate * 100):.1f}%。已为您启动交易降级流程，推荐替代方案。",
+                downgraded_alternative=downgraded_alt,
+                surge_triggered=True,
+                affected_airline=airline_code
+            )
+            _dbg_log("booking:downgraded", {
+                "price_change_rate": price_change_rate,
+                "airline": airline_code
+            })
+            return result
+        
+        result = BookingResult(
+            success=False,
+            intercept_level=PriceInterceptLevel.BLOCKED,
+            original_price=original_price,
+            final_price=final_price,
+            price_change_amount=price_change,
+            price_change_rate=price_change_rate,
+            message=f"🚫 交易已拦截：{airline_code}航空价格暴涨 {(price_change_rate * 100):.1f}%，超出系统容忍阈值。为保障您的权益，交易已自动取消。",
+            surge_triggered=True,
+            affected_airline=airline_code
+        )
+        _dbg_log("booking:blocked", {
+            "price_change_rate": price_change_rate,
+            "airline": airline_code
+        })
+        return result
+        
+    except Exception as e:
+        _dbg_log("exception:booking", {
+            "error_type": type(e).__name__,
+            "error_msg": str(e),
+            "traceback": traceback.format_exc()
+        })
+        raise HTTPException(status_code=500, detail=f"预订处理出错: {str(e)}")

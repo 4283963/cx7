@@ -2,6 +2,15 @@ import React, { useState, useEffect, useCallback } from 'react'
 import axios from 'axios'
 import ScatterPlot from './components/ScatterPlot.jsx'
 
+const AIRLINE_OPTIONS = [
+  { code: 'CA', name: '中国国航' },
+  { code: 'MU', name: '东方航空' },
+  { code: 'CZ', name: '南方航空' },
+  { code: 'HU', name: '海南航空' },
+  { code: '3U', name: '四川航空' },
+  { code: 'ZH', name: '深圳航空' }
+]
+
 const App = () => {
   const [loading, setLoading] = useState(false)
   const [allCandidates, setAllCandidates] = useState([])
@@ -15,6 +24,19 @@ const App = () => {
     topN: 5,
     flightCount: 6,
     hotelCount: 5
+  })
+  
+  const [fuelSurge, setFuelSurge] = useState({
+    enabled: false,
+    targetAirline: 'CA',
+    priceIncreaseRate: 2.0,
+    applyOnBooking: true
+  })
+  
+  const [bookingModal, setBookingModal] = useState({
+    visible: false,
+    loading: false,
+    result: null
   })
 
   const fetchSampleAndCalculate = useCallback(async () => {
@@ -32,7 +54,13 @@ const App = () => {
         time_window: sampleData.time_window,
         top_n: formData.topN,
         price_weight: formData.priceWeight,
-        discount_weight: formData.discountWeight
+        discount_weight: formData.discountWeight,
+        fuel_surge: fuelSurge.enabled ? {
+          enabled: true,
+          target_airline: fuelSurge.targetAirline,
+          price_increase_rate: fuelSurge.priceIncreaseRate,
+          apply_on_booking: fuelSurge.applyOnBooking
+        } : null
       }
 
       const vizRes = await axios.post('/api/v1/packages/visualization', requestData)
@@ -51,7 +79,7 @@ const App = () => {
     } finally {
       setLoading(false)
     }
-  }, [formData])
+  }, [formData, fuelSurge])
 
   useEffect(() => {
     fetchSampleAndCalculate()
@@ -81,6 +109,63 @@ const App = () => {
     if (pkg) {
       setSelectedPackage(pkg)
     }
+  }
+
+  const handleFuelSurgeChange = (key, value) => {
+    setFuelSurge(prev => ({
+      ...prev,
+      [key]: value
+    }))
+  }
+
+  const handleBooking = async (pkg) => {
+    setBookingModal({
+      visible: true,
+      loading: true,
+      result: null
+    })
+    
+    try {
+      const bookData = {
+        package_id: pkg.package_id,
+        flight: pkg.flight,
+        hotel: pkg.hotel,
+        quoted_price: pkg.discounted_total_price,
+        fuel_surge: fuelSurge.enabled ? {
+          enabled: true,
+          target_airline: fuelSurge.targetAirline,
+          price_increase_rate: fuelSurge.priceIncreaseRate,
+          apply_on_booking: fuelSurge.applyOnBooking
+        } : null
+      }
+      
+      const response = await axios.post('/api/v1/packages/book', bookData)
+      
+      setBookingModal({
+        visible: true,
+        loading: false,
+        result: response.data
+      })
+    } catch (error) {
+      console.error('预订出错:', error)
+      setBookingModal({
+        visible: true,
+        loading: false,
+        result: {
+          success: false,
+          intercept_level: 'blocked',
+          message: '预订请求失败，请稍后重试'
+        }
+      })
+    }
+  }
+
+  const closeBookingModal = () => {
+    setBookingModal({
+      visible: false,
+      loading: false,
+      result: null
+    })
   }
 
   const bestPrice = allCandidates.length > 0 
@@ -190,6 +275,69 @@ const App = () => {
           </div>
 
           <div className="card" style={{ marginTop: '20px' }}>
+            <h2>⛽ 燃油费突增模拟</h2>
+            
+            <div className="form-group">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={fuelSurge.enabled}
+                  onChange={(e) => handleFuelSurgeChange('enabled', e.target.checked)}
+                />
+                <span>启用燃油费突增模拟</span>
+              </label>
+            </div>
+
+            {fuelSurge.enabled && (
+              <>
+                <div className="form-group">
+                  <label>目标航空公司</label>
+                  <select
+                    value={fuelSurge.targetAirline}
+                    onChange={(e) => handleFuelSurgeChange('targetAirline', e.target.value)}
+                  >
+                    {AIRLINE_OPTIONS.map(airline => (
+                      <option key={airline.code} value={airline.code}>
+                        {airline.code} - {airline.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label>价格涨幅: {(fuelSurge.priceIncreaseRate * 100).toFixed(0)}%</label>
+                  <div className="slider-group">
+                    <input
+                      type="range"
+                      min="0"
+                      max="5"
+                      step="0.1"
+                      value={fuelSurge.priceIncreaseRate}
+                      onChange={(e) => handleFuelSurgeChange('priceIncreaseRate', parseFloat(e.target.value))}
+                    />
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={fuelSurge.applyOnBooking}
+                      onChange={(e) => handleFuelSurgeChange('applyOnBooking', e.target.checked)}
+                    />
+                    <span>购买时触发价格变动拦截</span>
+                  </label>
+                </div>
+
+                <div className="surge-warning">
+                  ⚠️ 启用后，{fuelSurge.targetAirline}航空的机票价格将上涨 {(fuelSurge.priceIncreaseRate * 100).toFixed(0)}%，
+                  模拟闭环定价系统误判场景
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="card" style={{ marginTop: '20px' }}>
             <h2>📊 统计概览</h2>
             <div className="stats-grid">
               <div className="stat-card">
@@ -237,15 +385,20 @@ const App = () => {
                 {topPackages.map((pkg) => (
                   <div 
                     key={pkg.package_id}
-                    className={`package-card ${selectedPackage?.package_id === pkg.package_id ? 'active' : ''}`}
+                    className={`package-card ${selectedPackage?.package_id === pkg.package_id ? 'active' : ''} ${pkg.fuel_surge_applied ? 'has-surge' : ''}`}
                     onClick={() => setSelectedPackage(pkg)}
                   >
                     <div className="package-title">
                       <span className="package-rank">{pkg.rank}</span>
                       {pkg.flight.flight_no} + {pkg.hotel.hotel_name}
+                      {pkg.fuel_surge_applied && (
+                        <span className="fuel-surge-badge">⛽ 燃油费</span>
+                      )}
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap' }}>
-                      <span className="package-price">¥{pkg.discounted_total_price.toLocaleString()}</span>
+                      <span className="package-price">
+                        ¥{pkg.discounted_total_price.toLocaleString()}
+                      </span>
                       <span className="package-discount">省 ¥{pkg.total_discount_amount.toFixed(0)}</span>
                     </div>
                     <div className="package-details">
@@ -262,6 +415,15 @@ const App = () => {
                       </div>
                       <span className="score-text">{(pkg.recommendation_score * 100).toFixed(1)}%</span>
                     </div>
+                    <button 
+                      className="btn-book"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        handleBooking(pkg)
+                      }}
+                    >
+                      立即购买
+                    </button>
                   </div>
                 ))}
               </div>
@@ -269,6 +431,86 @@ const App = () => {
           </div>
         </div>
       </div>
+
+      {bookingModal.visible && (
+        <div className="modal-overlay" onClick={closeBookingModal}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            {bookingModal.loading ? (
+              <div className="booking-loading">
+                <div className="spinner"></div>
+                <p>正在确认价格...</p>
+                <p className="booking-subtext">闭环定价系统实时校验中</p>
+              </div>
+            ) : bookingModal.result ? (
+              <div className={`booking-result booking-${bookingModal.result.intercept_level}`}>
+                <div className="booking-icon">
+                  {bookingModal.result.intercept_level === 'none' && '✅'}
+                  {bookingModal.result.intercept_level === 'warning' && '⚠️'}
+                  {bookingModal.result.intercept_level === 'downgraded' && '🔄'}
+                  {bookingModal.result.intercept_level === 'blocked' && '🚫'}
+                </div>
+                
+                <h3 className="booking-title">
+                  {bookingModal.result.intercept_level === 'none' && '预订成功'}
+                  {bookingModal.result.intercept_level === 'warning' && '价格变动提醒'}
+                  {bookingModal.result.intercept_level === 'downgraded' && '交易降级处理'}
+                  {bookingModal.result.intercept_level === 'blocked' && '交易已拦截'}
+                </h3>
+                
+                <p className="booking-message">{bookingModal.result.message}</p>
+                
+                {bookingModal.result.surge_triggered && (
+                  <div className="surge-detail">
+                    <div className="surge-header">
+                      <span>⛽ 燃油费突增影响</span>
+                      <span className="surge-airline">{bookingModal.result.affected_airline}航空</span>
+                    </div>
+                    <div className="price-compare">
+                      <div className="price-item">
+                        <span className="price-label">原始价格</span>
+                        <span className="price-value old">¥{bookingModal.result.original_price.toLocaleString()}</span>
+                      </div>
+                      <div className="price-arrow">→</div>
+                      <div className="price-item">
+                        <span className="price-label">当前价格</span>
+                        <span className="price-value new">¥{bookingModal.result.final_price.toLocaleString()}</span>
+                      </div>
+                    </div>
+                    <div className="price-change">
+                      涨幅 <span className={`change-rate ${bookingModal.result.price_change_rate > 0.3 ? 'danger' : bookingModal.result.price_change_rate > 0.05 ? 'warning' : 'normal'}`}>
+                        +{(bookingModal.result.price_change_rate * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                  </div>
+                )}
+                
+                {bookingModal.result.downgraded_alternative && (
+                  <div className="downgrade-section">
+                    <h4>💡 推荐替代方案</h4>
+                    <p>{bookingModal.result.downgraded_alternative.description}</p>
+                    <div className="airline-suggestions">
+                      {bookingModal.result.downgraded_alternative.suggested_airlines?.map(airline => (
+                        <span key={airline} className="airline-tag">{airline}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                
+                <div className="booking-actions">
+                  <button className="btn btn-secondary" onClick={closeBookingModal}>
+                    {bookingModal.result.success ? '确定' : '我知道了'}
+                  </button>
+                  {bookingModal.result.intercept_level === 'downgraded' && (
+                    <button className="btn btn-primary">
+                      接受新价格
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

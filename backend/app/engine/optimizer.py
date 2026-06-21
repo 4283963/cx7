@@ -221,6 +221,9 @@ def solve_multi_objective_packages(candidate_df: pd.DataFrame,
         flight: FlightInfo = row['flight_obj']
         hotel: HotelInfo = row['hotel_obj']
         
+        fuel_applied = bool(row.get('fuel_surge_applied', False)) if 'fuel_surge_applied' in row else False
+        base_before = float(row['base_price_before_surge']) if fuel_applied and 'base_price_before_surge' in row and pd.notna(row['base_price_before_surge']) else None
+        
         pkg = PackageRecommendation(
             rank=idx + 1,
             package_id=f"PKG-{idx + 1:03d}-{flight.flight_no}-{hotel.hotel_id}",
@@ -232,7 +235,9 @@ def solve_multi_objective_packages(candidate_df: pd.DataFrame,
             total_discount_rate=round(row['total_discount_rate'], 4),
             recommendation_score=round(row['recommendation_score'], 4),
             stay_days=row['stay_days'],
-            conflict_free=row['conflict_free']
+            conflict_free=row['conflict_free'],
+            fuel_surge_applied=fuel_applied,
+            base_price_before_surge=base_before
         )
         recommendations.append(pkg)
     
@@ -269,6 +274,8 @@ def get_all_candidates_for_visualization(candidate_df: pd.DataFrame,
     
     result = []
     for _, row in valid_df.iterrows():
+        fuel_applied = bool(row.get('fuel_surge_applied', False)) if 'fuel_surge_applied' in row else False
+        base_before = float(row['base_price_before_surge']) if fuel_applied and 'base_price_before_surge' in row and pd.notna(row['base_price_before_surge']) else None
         result.append({
             'package_id': f"{row['flight_no']}-{row['hotel_id']}",
             'discounted_total_price': round(row['discounted_total_price'], 2),
@@ -278,7 +285,9 @@ def get_all_candidates_for_visualization(candidate_df: pd.DataFrame,
             'is_pareto_optimal': bool(row['is_pareto_optimal']),
             'flight_no': row['flight_no'],
             'hotel_id': row['hotel_id'],
-            'stay_days': int(row['stay_days'])
+            'stay_days': int(row['stay_days']),
+            'fuel_surge_applied': fuel_applied,
+            'base_price_before_surge': base_before
         })
     
     return result
